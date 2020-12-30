@@ -1,8 +1,10 @@
+use std::fs;
 use std::io::Write;
+use std::path;
 
 pub struct KeyValue {
     key: String,
-    value: String,
+    value: u32,
 }
 
 fn map(_filename: &str, contents: String) -> Vec<KeyValue> {
@@ -12,7 +14,7 @@ fn map(_filename: &str, contents: String) -> Vec<KeyValue> {
         if !word.is_empty() {
             kva.push(KeyValue {
                 key: word.to_owned(),
-                value: String::from("1"),
+                value: 1,
             });
         }
     }
@@ -20,7 +22,7 @@ fn map(_filename: &str, contents: String) -> Vec<KeyValue> {
     kva
 }
 
-fn reduce(_key: &str, values: &Vec<String>) -> String {
+fn reduce(_key: &str, values: &Vec<u32>) -> String {
     values.len().to_string()
 }
 
@@ -34,7 +36,7 @@ fn main() {
 
     let mut intermediate = Vec::new();
     for file in args.iter().skip(1) {
-        let contents = std::fs::read_to_string(file.as_str()).unwrap();
+        let contents = fs::read_to_string(file.as_str()).unwrap();
         let map = map(file.as_str(), contents);
         intermediate.extend(map);
     }
@@ -42,7 +44,11 @@ fn main() {
     intermediate.sort_by(|a, b| a.key.cmp(&b.key));
 
     let mut i = 0;
-    std::fs::File::create("output/mr-out.out").unwrap();
+
+    if !path::Path::new("output").exists() {
+        fs::create_dir("output").unwrap();
+    }
+    fs::File::create("output/mr-out.out").unwrap();
     let mut outfile = std::fs::OpenOptions::new()
         .append(true)
         .open("output/mr-out.out")
