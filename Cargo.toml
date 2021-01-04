@@ -2,4 +2,6 @@
 
 members = [
     "mr-sequential",
+	"mr-master",
+	"mr-worker",
 ]
