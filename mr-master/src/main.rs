@@ -1,6 +1,5 @@
 mod master;
 use master::Master;
-use std::collections::HashSet;
 
 #[tokio::main]
 async fn main() {
@@ -11,12 +10,12 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let mut tasks = HashSet::new();
+    let mut tasks = Vec::new();
 
     args.into_iter().for_each(|item| {
-        let _ = tasks.insert(item);
+        let _ = tasks.push(item);
     });
 
-    let master = Master::new(tasks);
+    let master = Master::new(tasks, 10);
     master.serve().await;
 }

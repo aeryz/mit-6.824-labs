@@ -208,9 +208,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mr-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "mr-master"
 version = "0.1.0"
 dependencies = [
+ "mr-common",
  "serde",
  "serde_json",
  "srpc",
@@ -225,6 +233,7 @@ version = "0.1.0"
 name = "mr-worker"
 version = "0.1.0"
 dependencies = [
+ "mr-common",
  "serde",
  "serde_json",
  "srpc",
@@ -483,7 +492,7 @@ dependencies = [
 [[package]]
 name = "srpc"
 version = "0.1.0"
-source = "git+https://github.com/aeryz/srpc?branch=main#1902389ef22c0bbfc3254c02f8e72c5827b2a789"
+source = "git+https://github.com/aeryz/srpc?branch=main#311d29ca10ccc2fa48b866cda180604ba22d0047"
 dependencies = [
  "bytes",
  "futures",
@@ -498,7 +507,7 @@ dependencies = [
 [[package]]
 name = "srpc-macros"
 version = "0.1.0"
-source = "git+https://github.com/aeryz/srpc?branch=main#1902389ef22c0bbfc3254c02f8e72c5827b2a789"
+source = "git+https://github.com/aeryz/srpc?branch=main#311d29ca10ccc2fa48b866cda180604ba22d0047"
 dependencies = [
  "proc-macro2 0.4.30",
  "quote",
