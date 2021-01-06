@@ -19,6 +19,7 @@ impl Service {
         let mut master = self.master.write().unwrap();
         match master.pending_tasks.pop() {
             None => {
+                std::thread::sleep(Duration::from_secs(1000));
                 if master.working_tasks.is_empty() {
                     TaskResult::Done
                 } else {
@@ -26,6 +27,8 @@ impl Service {
                 }
             }
             Some(task) => {
+                println!("Giving task {:?}", task);
+                master.working_tasks.insert(task.unique_id);
                 tokio::spawn(Master::trace_task(self.master.clone(), task.clone()));
                 TaskResult::Ready(task)
             }
@@ -34,20 +37,31 @@ impl Service {
 
     async fn on_task_finished(
         self: Arc<Self>,
-        task_id: u32,
+        unique_id: u32,
+        worker_id: u32,
         task_kind: TaskKind,
-        file_paths: Vec<String>,
     ) {
-        let mut master = self.master.write().unwrap();
-        if master.working_tasks.remove(&task_id) && task_kind == TaskKind::Map {
-            file_paths
-                .into_iter()
-                .enumerate()
-                .for_each(|(id, file_path)| {
-                    master
-                        .pending_tasks
-                        .push(Task::new(id as u32, TaskContext::Reduce { file_path }));
-                });
+        {
+            let mut master = self.master.write().unwrap();
+            if master.working_tasks.remove(&unique_id) && task_kind == TaskKind::Map {
+                master.finished_map_ids.push(worker_id);
+            }
+        }
+
+        if task_kind == TaskKind::Map {
+            std::thread::sleep(Duration::from_millis(200));
+            let mut master = self.master.write().unwrap();
+            for id in 0..master.n_reduce {
+                let new_task = Task::new(
+                    rand::random(),
+                    id,
+                    TaskContext::Reduce {
+                        file_ids: master.finished_map_ids.clone(),
+                    },
+                );
+                master.pending_tasks.push(new_task);
+            }
+            master.finished_map_ids = Vec::new();
         }
     }
 }
@@ -55,6 +69,7 @@ impl Service {
 pub struct Master {
     pending_tasks: BinaryHeap<Task>,
     working_tasks: HashSet<u32>,
+    finished_map_ids: Vec<u32>,
     n_reduce: u32,
 }
 
@@ -66,6 +81,7 @@ impl Master {
             .enumerate()
             .for_each(|(id, file_path)| {
                 pending_tasks.push(Task::new(
+                    rand::random(),
                     id as u32,
                     TaskContext::Map {
                         n_reduce,
@@ -77,6 +93,7 @@ impl Master {
         Self {
             pending_tasks,
             working_tasks: HashSet::new(),
+            finished_map_ids: Vec::new(),
             n_reduce,
         }
     }
@@ -85,9 +102,9 @@ impl Master {
         sleep(Duration::from_secs(10)).await;
         let mut master = master.write().unwrap();
 
-        if master.working_tasks.remove(&task.worker_id) {
+        if master.working_tasks.remove(&task.unique_id) {
             // Then we know that it is not finished yet so it is timed-out.
-            eprintln!("Task {}({:?}) timed out.", task.worker_id, task.context);
+            eprintln!("Task {}({:?}) timed out.", task.unique_id, task.context);
             master.pending_tasks.push(task);
         }
     }
@@ -100,5 +117,44 @@ impl Master {
             Service::caller,
         );
         let _ = server.serve("127.0.0.1:8080").await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_map_task(worker_id: u32) -> Task {
+        Task::new(
+            rand::random(),
+            worker_id,
+            TaskContext::Map {
+                n_reduce: 1,
+                file_path: String::from(""),
+            },
+        )
+    }
+
+    fn get_reduce_task(worker_id: u32) -> Task {
+        Task::new(
+            rand::random(),
+            worker_id,
+            TaskContext::Reduce {
+                file_ids: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_priority_queue() {
+        let mut pq = BinaryHeap::new();
+        pq.push(get_map_task(10));
+        pq.push(get_reduce_task(9));
+        pq.push(get_map_task(8));
+        pq.push(get_reduce_task(7));
+        pq.push(get_map_task(6));
+
+        assert_eq!(pq.pop().unwrap().worker_id, 9);
+        assert_eq!(pq.pop().unwrap().worker_id, 7);
     }
 }

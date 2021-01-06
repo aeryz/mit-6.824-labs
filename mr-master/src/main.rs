@@ -12,10 +12,10 @@ async fn main() {
 
     let mut tasks = Vec::new();
 
-    args.into_iter().for_each(|item| {
+    args.into_iter().skip(1).for_each(|item| {
         let _ = tasks.push(item);
     });
 
-    let master = Master::new(tasks, 10);
+    let master = Master::new(tasks, 1);
     master.serve().await;
 }
