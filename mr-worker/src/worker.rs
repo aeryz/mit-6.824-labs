@@ -35,7 +35,10 @@ trait Service {
     async fn get_task() -> TaskResult;
 
     #[notification]
-    async fn on_task_finished(unique_id: u32, worker_id: u32, task_kind: TaskKind);
+    async fn on_map_finished(unique_id: UniqueId);
+
+    #[notification]
+    async fn on_reduce_finished(task_id: TaskId);
 }
 
 fn read_lines<P: AsRef<Path>>(
@@ -52,82 +55,82 @@ fn read_lines<P: AsRef<Path>>(
     Ok(())
 }
 
-async fn process_task(client: &Client, task: Task) {
-    match task.context {
-        TaskContext::Map {
-            n_reduce,
-            file_path,
-        } => {
-            let contents = fs::read_to_string(file_path.as_str()).unwrap();
-            let kvs = map(file_path, contents);
-            let mut file_map = HashMap::new();
-            for i in 0..n_reduce {
-                let file_name = format!("mr-map-{}-{}", task.worker_id, i);
-                let _ = File::create(file_name.as_str()).unwrap();
-                let outfile = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(file_name.as_str())
-                    .unwrap();
-                file_map.insert(i, outfile);
-            }
-
-            for (key, value) in kvs {
-                let mut s = DefaultHasher::new();
-                key.hash(&mut s);
-                let index = (s.finish() % n_reduce as u64) as u32;
-                let _ = writeln!(file_map.get(&index).unwrap(), "{} {}", key, value);
-            }
-
-            let _ =
-                Service::on_task_finished(client, task.unique_id, task.worker_id, TaskKind::Map)
-                    .await;
-        }
-        TaskContext::Reduce { file_ids } => {
-            println!(
-                "[DEBUG] Task id: {}, Worker id: {}, File Ids: {:?}",
-                task.unique_id, task.worker_id, file_ids
-            );
-            let mut intermediate = Vec::new();
-            for id in &file_ids {
-                let filename = format!("mr-map-{}-{}", id, task.worker_id);
-                let _ = read_lines(&mut intermediate, filename).unwrap();
-            }
-
-            let outname = format!("mr-out-{}", task.worker_id);
-            if file_ids.len() != 0 {
-                let _ = read_lines(&mut intermediate, outname.as_str());
-            }
-
-            intermediate.sort_by(|(a, _), (b, _)| a.cmp(&b));
-            let out_name = format!("mr-out-{}", task.worker_id);
-            File::create(out_name.as_str()).unwrap();
-            let mut outfile = std::fs::OpenOptions::new()
+async fn map_task(client: &Client, task: Task) {
+    if let TaskContext::Map {
+        n_reduce,
+        file_path,
+    } = task.context
+    {
+        let contents = fs::read_to_string(file_path.as_str()).unwrap();
+        let kvs = map(file_path, contents);
+        let mut file_map = HashMap::new();
+        for i in 0..n_reduce {
+            let file_name = format!("mr-{}-{}", task.task_id, i);
+            let _ = File::create(file_name.as_str()).unwrap();
+            let outfile = std::fs::OpenOptions::new()
                 .append(true)
-                .open(out_name.as_str())
+                .open(file_name.as_str())
                 .unwrap();
+            file_map.insert(i, outfile);
+        }
 
-            let mut i = 0;
-            while i < intermediate.len() {
-                let mut j = i + 1;
-                while j < intermediate.len() && intermediate[j].0 == intermediate[i].0 {
-                    j += 1;
-                }
+        for (key, value) in kvs {
+            let mut s = DefaultHasher::new();
+            key.hash(&mut s);
+            let index = (s.finish() % n_reduce as u64) as u32;
+            let _ = writeln!(file_map.get(&index).unwrap(), "{} {}", key, value);
+        }
 
-                let mut values = Vec::new();
-                for k in i..j {
-                    values.push(intermediate[k].1);
-                }
-                let output = reduce(&intermediate[i].0, &values);
+        let _ = Service::on_map_finished(client, task.unique_id).await;
+    }
+}
 
-                writeln!(&mut outfile, "{} {}", intermediate[i].0, output).unwrap();
+async fn reduce_task(client: &Client, task: Task) {
+    if let TaskContext::Reduce { mapper_ids } = task.context {
+        println!("[DEBUG] Will parse mr-{:?}-{}", mapper_ids, task.task_id);
 
-                i = j;
+        let out_name = format!("mr-out-{}", task.task_id);
+
+        let mut intermediate = Vec::new();
+        for id in &mapper_ids {
+            let _ = read_lines(&mut intermediate, format!("mr-{}-{}", id, task.task_id)).unwrap();
+        }
+        let _ = read_lines(&mut intermediate, out_name.as_str());
+
+        intermediate.sort_by(|(a, _), (b, _)| a.cmp(&b));
+        File::create(out_name.as_str()).unwrap();
+        let mut outfile = std::fs::OpenOptions::new()
+            .append(true)
+            .open(out_name.as_str())
+            .unwrap();
+
+        let mut i = 0;
+        while i < intermediate.len() {
+            let mut j = i + 1;
+            while j < intermediate.len() && intermediate[j].0 == intermediate[i].0 {
+                j += 1;
             }
 
-            let _ =
-                Service::on_task_finished(client, task.unique_id, task.worker_id, TaskKind::Reduce)
-                    .await;
+            let mut values = Vec::new();
+            for k in i..j {
+                values.push(intermediate[k].1);
+            }
+            let output = reduce(&intermediate[i].0, &values);
+
+            writeln!(&mut outfile, "{} {}", intermediate[i].0, output).unwrap();
+
+            i = j;
         }
+
+        let _ = Service::on_reduce_finished(client, task.task_id).await;
+    }
+}
+
+async fn process_task(client: &Client, task: Task) {
+    if task.is_map() {
+        map_task(client, task).await;
+    } else {
+        reduce_task(client, task).await;
     }
 }
 
@@ -139,11 +142,11 @@ pub async fn run() {
     );
 
     loop {
-        std::thread::sleep(Duration::from_secs(1));
         let task_result = match Service::get_task(&client).await {
             Ok(res) => res,
             Err(err) => {
                 eprintln!("Unexpected error occured {}", err);
+                std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
@@ -151,7 +154,7 @@ pub async fn run() {
         match task_result {
             TaskResult::Ready(task) => process_task(&client, task).await,
             TaskResult::Done => std::process::exit(0),
-            TaskResult::Pending => {}
+            TaskResult::Pending => std::thread::sleep(Duration::from_secs(1)),
         }
     }
 }

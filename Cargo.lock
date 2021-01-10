@@ -246,6 +246,7 @@ name = "mr-worker"
 version = "0.1.0"
 dependencies = [
  "mr-common",
+ "rand 0.8.1",
  "serde",
  "serde_json",
  "srpc",

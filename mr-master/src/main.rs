@@ -6,7 +6,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: mrsequential inputfiles...\n");
+        eprintln!("Usage: mr-master inputfiles...\n");
         std::process::exit(1);
     }
 
@@ -16,6 +16,6 @@ async fn main() {
         let _ = tasks.push(item);
     });
 
-    let master = Master::new(tasks, 1);
+    let master = Master::new(tasks, 10);
     master.serve().await;
 }

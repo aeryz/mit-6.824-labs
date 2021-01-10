@@ -2,159 +2,161 @@ use {
     mr_common::*,
     srpc::server::Server,
     std::{
-        collections::{BinaryHeap, HashSet},
-        sync::{Arc, RwLock},
+        collections::{HashMap, VecDeque},
+        sync::{Arc, Mutex},
         time::Duration,
     },
     tokio::time::sleep,
 };
 
-struct Service {
-    master: Arc<RwLock<Master>>,
+type MapIds = Vec<TaskId>;
+
+pub struct Service {
+    master: Arc<Mutex<Master>>,
 }
 
 #[srpc::service]
 impl Service {
+    #[allow(unused)]
     async fn get_task(self: Arc<Self>) -> TaskResult {
-        let mut master = self.master.write().unwrap();
-        match master.pending_tasks.pop() {
+        let mut master = self.master.lock().unwrap();
+
+        let mut t_id = None;
+        for task_id in master.reduce_queue.keys() {
+            if !master.working_reduces.contains_key(&task_id) {
+                t_id = Some(*task_id);
+            }
+        }
+        let task = if let Some(task_id) = t_id {
+            let map_ids = master.reduce_queue.remove(&task_id).unwrap();
+            Some(Task::new(
+                rand::random(),
+                task_id.clone(),
+                TaskContext::new_reduce(map_ids),
+            ))
+        } else {
+            master.map_queue.pop_front()
+        };
+
+        match task {
+            Some(t) => {
+                if t.is_map() {
+                    master.working_maps.insert(t.unique_id, t.clone());
+
+                    println!("Giving map");
+                    tokio::spawn(Master::trace_task(
+                        self.master.clone(),
+                        t.unique_id,
+                        TaskKind::Map,
+                    ));
+                } else {
+                    master.working_reduces.insert(t.task_id, t.clone());
+                    println!("Giving reduce");
+                    tokio::spawn(Master::trace_task(
+                        self.master.clone(),
+                        t.unique_id,
+                        TaskKind::Reduce,
+                    ));
+                }
+                TaskResult::Ready(t)
+            }
             None => {
-                std::thread::sleep(Duration::from_secs(1000));
-                if master.working_tasks.is_empty() {
+                if master.working_maps.is_empty() && master.working_reduces.is_empty() {
                     TaskResult::Done
                 } else {
                     TaskResult::Pending
                 }
             }
-            Some(task) => {
-                println!("Giving task {:?}", task);
-                master.working_tasks.insert(task.unique_id);
-                tokio::spawn(Master::trace_task(self.master.clone(), task.clone()));
-                TaskResult::Ready(task)
-            }
         }
     }
 
-    async fn on_task_finished(
-        self: Arc<Self>,
-        unique_id: u32,
-        worker_id: u32,
-        task_kind: TaskKind,
-    ) {
-        {
-            let mut master = self.master.write().unwrap();
-            if master.working_tasks.remove(&unique_id) && task_kind == TaskKind::Map {
-                master.finished_map_ids.push(worker_id);
-            }
+    #[allow(unused)]
+    async fn on_map_finished(self: Arc<Self>, unique_id: UniqueId) {
+        let mut master = self.master.lock().unwrap();
+        if let Some(t) = master.working_maps.remove(&unique_id) {
+            master.on_map_finished(t.task_id);
         }
+    }
 
-        if task_kind == TaskKind::Map {
-            std::thread::sleep(Duration::from_millis(200));
-            let mut master = self.master.write().unwrap();
-            for id in 0..master.n_reduce {
-                let new_task = Task::new(
-                    rand::random(),
-                    id,
-                    TaskContext::Reduce {
-                        file_ids: master.finished_map_ids.clone(),
-                    },
-                );
-                master.pending_tasks.push(new_task);
-            }
-            master.finished_map_ids = Vec::new();
+    #[allow(unused)]
+    async fn on_reduce_finished(self: Arc<Self>, task_id: TaskId) {
+        let mut master = self.master.lock().unwrap();
+        if let Some(t) = master.working_reduces.remove(&task_id) {
+            master.on_reduce_finished(t.task_id);
         }
     }
 }
 
 pub struct Master {
-    pending_tasks: BinaryHeap<Task>,
-    working_tasks: HashSet<u32>,
-    finished_map_ids: Vec<u32>,
-    n_reduce: u32,
+    pub map_queue: VecDeque<Task>,
+    pub working_maps: HashMap<UniqueId, Task>,
+    pub working_reduces: HashMap<TaskId, Task>,
+    pub reduce_queue: HashMap<TaskId, MapIds>,
+    pub n_reduce: u32,
 }
 
 impl Master {
     pub fn new(file_paths: Vec<String>, n_reduce: u32) -> Self {
-        let mut pending_tasks = BinaryHeap::new();
+        let mut map_queue = VecDeque::new();
         file_paths
             .into_iter()
             .enumerate()
-            .for_each(|(id, file_path)| {
-                pending_tasks.push(Task::new(
+            .for_each(|(i, file_path)| {
+                map_queue.push_front(Task::new(
                     rand::random(),
-                    id as u32,
-                    TaskContext::Map {
-                        n_reduce,
-                        file_path,
-                    },
+                    i as TaskId,
+                    TaskContext::new_map(n_reduce, file_path),
                 ));
             });
 
         Self {
-            pending_tasks,
-            working_tasks: HashSet::new(),
-            finished_map_ids: Vec::new(),
+            map_queue,
+            working_maps: HashMap::new(),
+            working_reduces: HashMap::new(),
+            reduce_queue: HashMap::new(),
             n_reduce,
         }
     }
 
-    pub async fn trace_task(master: Arc<RwLock<Master>>, task: Task) {
-        sleep(Duration::from_secs(10)).await;
-        let mut master = master.write().unwrap();
+    pub fn on_map_finished(&mut self, task_id: TaskId) {
+        println!("Map: {} is finished", task_id);
+        for i in 0..self.n_reduce {
+            if let Some(map_ids) = self.reduce_queue.get_mut(&i) {
+                map_ids.push(task_id);
+            } else {
+                self.reduce_queue.insert(i, vec![task_id]);
+            }
+        }
+    }
 
-        if master.working_tasks.remove(&task.unique_id) {
-            // Then we know that it is not finished yet so it is timed-out.
-            eprintln!("Task {}({:?}) timed out.", task.unique_id, task.context);
-            master.pending_tasks.push(task);
+    pub fn on_reduce_finished(&mut self, _task_id: TaskId) {}
+
+    pub async fn trace_task(master: Arc<Mutex<Master>>, task_id: TaskId, task_kind: TaskKind) {
+        sleep(Duration::from_secs(10)).await;
+        let mut master = master.lock().unwrap();
+
+        if task_kind == TaskKind::Map {
+            if let Some(t) = master.working_maps.remove(&task_id) {
+                master.map_queue.push_front(t);
+            }
+        } else {
+            if let Some(Task {
+                context: TaskContext::Reduce { mapper_ids },
+                ..
+            }) = master.working_reduces.remove(&task_id)
+            {
+                master.reduce_queue.insert(task_id, mapper_ids);
+            }
         }
     }
 
     pub async fn serve(self) {
         let server = Server::new(
             Service {
-                master: Arc::new(RwLock::new(self)),
+                master: Arc::new(Mutex::new(self)),
             },
             Service::caller,
         );
         let _ = server.serve("127.0.0.1:8080").await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn get_map_task(worker_id: u32) -> Task {
-        Task::new(
-            rand::random(),
-            worker_id,
-            TaskContext::Map {
-                n_reduce: 1,
-                file_path: String::from(""),
-            },
-        )
-    }
-
-    fn get_reduce_task(worker_id: u32) -> Task {
-        Task::new(
-            rand::random(),
-            worker_id,
-            TaskContext::Reduce {
-                file_ids: Vec::new(),
-            },
-        )
-    }
-
-    #[test]
-    fn test_priority_queue() {
-        let mut pq = BinaryHeap::new();
-        pq.push(get_map_task(10));
-        pq.push(get_reduce_task(9));
-        pq.push(get_map_task(8));
-        pq.push(get_reduce_task(7));
-        pq.push(get_map_task(6));
-
-        assert_eq!(pq.pop().unwrap().worker_id, 9);
-        assert_eq!(pq.pop().unwrap().worker_id, 7);
     }
 }

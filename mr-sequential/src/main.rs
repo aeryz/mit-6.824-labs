@@ -22,8 +22,10 @@ fn map(_filename: &str, contents: String) -> Vec<KeyValue> {
     kva
 }
 
-fn reduce(_key: &str, values: &Vec<u32>) -> String {
-    values.len().to_string()
+fn reduce(_key: &str, values: &Vec<u32>) -> u32 {
+    let mut sum = 0;
+    values.iter().for_each(|i| sum += i);
+    sum
 }
 
 fn main() {

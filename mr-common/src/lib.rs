@@ -3,13 +3,29 @@ use {
     std::cmp::Ordering,
 };
 
+pub type TaskId = u32;
+pub type UniqueId = u32;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TaskContext {
     Map { n_reduce: u32, file_path: String },
-    Reduce { file_ids: Vec<u32> },
+    Reduce { mapper_ids: Vec<TaskId> },
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+impl TaskContext {
+    pub fn new_map(n_reduce: u32, file_path: String) -> Self {
+        TaskContext::Map {
+            n_reduce,
+            file_path,
+        }
+    }
+
+    pub fn new_reduce(mapper_ids: Vec<TaskId>) -> Self {
+        TaskContext::Reduce { mapper_ids }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TaskKind {
     Map,
     Reduce,
@@ -24,16 +40,16 @@ pub enum TaskResult {
 
 #[derive(Clone, Debug, Eq, Serialize, Deserialize)]
 pub struct Task {
-    pub unique_id: u32,
-    pub worker_id: u32,
+    pub unique_id: UniqueId,
+    pub task_id: TaskId,
     pub context: TaskContext,
 }
 
 impl Task {
-    pub fn new(unique_id: u32, worker_id: u32, context: TaskContext) -> Self {
+    pub fn new(unique_id: UniqueId, task_id: TaskId, context: TaskContext) -> Self {
         Self {
             unique_id,
-            worker_id,
+            task_id,
             context,
         }
     }
